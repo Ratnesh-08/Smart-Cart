@@ -108,8 +108,10 @@ class SmartCartStore {
 
     // UI state
     this.toast = null;
-    this.scannerState = 'idle';
+    this.scannerState = 'scanning'; // 'scanning' | 'found' | 'not-found' | 'error' | 'permission-denied'
     this.scannedProduct = null;
+    this.scannedBarcode = null;
+    this.scannerError = null;
     this.itemToRemove = null;
     this.selectedPaymentMethod = 'upi';
   }
@@ -621,6 +623,38 @@ class SmartCartStore {
   deleteAiRecommendation(recId) {
     this.aiRecommendations = this.aiRecommendations.filter(r => r.id !== recId);
     this.showToast('Rule removed', 'info');
+    this.notify();
+  }
+
+  // Scanner State Management
+  setScannedProduct(product) {
+    this.scannedProduct = product;
+    this.scannerState = 'found';
+    this.scannedBarcode = product.barcode;
+    this.scannerError = null;
+    this.notify();
+  }
+
+  setScannerNotFound(barcode, errorMsg = null) {
+    this.scannedProduct = null;
+    this.scannerState = 'not-found';
+    this.scannedBarcode = barcode;
+    this.scannerError = errorMsg || `No product found in database matching barcode: ${barcode}`;
+    this.notify();
+  }
+
+  setScannerError(errorMsg) {
+    this.scannedProduct = null;
+    this.scannerState = 'error';
+    this.scannerError = errorMsg;
+    this.notify();
+  }
+
+  resetScannerState() {
+    this.scannedProduct = null;
+    this.scannerState = 'scanning';
+    this.scannedBarcode = null;
+    this.scannerError = null;
     this.notify();
   }
 

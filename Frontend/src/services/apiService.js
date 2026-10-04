@@ -8,6 +8,7 @@
 
 import { store } from '../store/state.js';
 import { askSmartCartAi as callGeminiAi } from './geminiService.js';
+import { getProductByBarcodeFromSupabase } from './supabaseClient.js';
 
 // Simulated network latency helper
 const simulateLatency = (ms = 60) => new Promise(resolve => setTimeout(resolve, ms));
@@ -58,11 +59,24 @@ export async function fetchProductById(id) {
  * Real endpoint: GET /api/v1/products/barcode/:barcode
  */
 export async function fetchProductByBarcode(barcode) {
-  await simulateLatency(60);
   try {
-    const product = store.products.find(p => p.barcode === barcode);
-    if (!product) throw new Error(`No product found matching barcode ${barcode}`);
-    return { success: true, data: product };
+    // Primary source of truth: Supabase PostgreSQL products table
+    const dbResult = await getProductByBarcodeFromSupabase(barcode);
+    if (dbResult.success && dbResult.data) {
+      return dbResult;
+    }
+
+    // Fallback if DB returns not found or error: check local product store catalog if match exists
+    const localProduct = store.products.find(p => p.barcode === String(barcode).trim());
+    if (localProduct) {
+      return { success: true, data: localProduct };
+    }
+
+    return {
+      success: false,
+      error: dbResult.error || `No product found matching barcode ${barcode}`,
+      data: null
+    };
   } catch (error) {
     return { success: false, error: error.message, data: null };
   }

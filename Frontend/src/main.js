@@ -6,7 +6,7 @@ import { store } from './store/state.js';
 // Customer Views
 import { renderCustomerStartShopping, bindStartShoppingEvents } from './views/customer/StartShoppingView.js';
 import { renderCustomerHome, bindHomeEvents } from './views/customer/HomeView.js';
-import { renderCustomerScan, bindScanEvents } from './views/customer/ScanView.js';
+import { renderCustomerScan, bindScanEvents, stopScanner } from './views/customer/ScanView.js';
 import { renderCustomerProductDetails, bindProductDetailsEvents } from './views/customer/ProductDetailsView.js';
 import { renderCustomerNavigate, bindNavigateEvents } from './views/customer/NavigateView.js';
 import { renderCustomerAi, bindAiEvents } from './views/customer/AiView.js';
@@ -35,6 +35,10 @@ const appEl = document.querySelector('#app');
 function renderApp() {
   const isCustomer = store.activeRole === 'customer';
   const cartItemCount = store.getCartItemCount();
+
+  if (!isCustomer) {
+    stopScanner();
+  }
 
   appEl.innerHTML = `
     <div class="app-shell">
@@ -82,6 +86,9 @@ function renderApp() {
 // Render Customer Mobile Shell Layout
 function renderCustomerShell(cartItemCount) {
   const tab = store.customerTab;
+  if (tab !== 'scan') {
+    stopScanner();
+  }
 
   let contentHtml = '';
   if (tab === 'start-shopping') contentHtml = renderCustomerStartShopping();

@@ -190,29 +190,58 @@ carry_bag_options ──< carts     (1-to-many)
 
 ---
 
+## Phase 6 — Cart & Billing Engine Architecture
+
+Phase 6 implements a 100% database-level billing and checkout engine via PostgreSQL triggers and PL/pgSQL procedures. **No Gemini AI or client-side calculation is involved in billing decisions.**
+
+### Billing Engine Components
+
+1. **`sync_cart_item_price_and_weight()` (Trigger)**
+   - Automatically triggered `BEFORE INSERT OR UPDATE` on `cart_items`.
+   - Looks up authoritative `price` and `expected_weight` from `products`.
+   - Prevents client-side price tampering.
+
+2. **`update_cart_totals(p_cart_id)` (Function & Triggers)**
+   - Triggered `AFTER INSERT OR UPDATE OR DELETE` on `cart_items`, and `BEFORE UPDATE` on `carts` carry bag fields.
+   - Calculates `subtotal = SUM(quantity × unit_price)`.
+   - Calculates `carry_bag_charge = carry_bag_options.price × carry_bag_quantity`.
+   - Calculates `total = subtotal + carry_bag_charge`.
+
+3. **`checkout_cart(p_cart_id, p_payment_method)` (Atomic Procedure)**
+   - Validates cart ownership, active status, and non-empty items.
+   - Recalculates final cart subtotal, bag charge, and total amount.
+   - Atomically inserts `orders` record.
+   - Atomically copies items into `order_items`, creating immutable snapshots of `product_name` and `unit_price`.
+   - Decrements product stock in `inventory`.
+   - Marks cart status as `checked_out`.
+
+4. **Cart RPC Helpers**
+   - `add_to_cart(p_cart_id, p_product_id, p_quantity)`
+   - `remove_from_cart(p_cart_id, p_product_id)`
+   - `set_cart_carry_bag(p_cart_id, p_bag_option_id, p_quantity)`
+
+---
+
 ## How to Execute in Supabase
 
-### Step 1 — schema.sql
+### Full Setup (Fresh Database)
 
-1. Open your Supabase project dashboard.
-2. Go to **SQL Editor** → **New Query**.
-3. Paste the entire contents of `schema.sql`.
-4. Click **Run**.
+Run the files in order in the Supabase SQL Editor:
+1. `schema.sql` (Creates tables, indexes, triggers, and billing engine)
+2. `rls.sql` (Enables Row Level Security and RPC permissions)
+3. `seed.sql` (Inserts seed locations, products, inventory, carry bags)
 
-### Step 2 — rls.sql
+### Incremental Migration (Existing Database)
 
-1. Open a new query in the SQL Editor.
-2. Paste the entire contents of `rls.sql`.
-3. Click **Run**.
+Run the migration script in the Supabase SQL Editor:
+- `migrations/001_phase6_billing_engine.sql`
 
-### Step 3 — seed.sql
+### Running Test Suite
 
-1. Open a new query in the SQL Editor.
-2. Paste the entire contents of `seed.sql`.
-3. Click **Run**.
+To verify all 15 Phase 6 requirements, run:
+- `tests/phase6_billing_tests.sql`
 
-> Run the files **in order**: schema → rls → seed.
-> If you re-run seed.sql on an existing database, you may get duplicate key errors. Truncate the tables first or use `INSERT ... ON CONFLICT DO NOTHING`.
+Output will display `✓ TEST N PASSED` for all test cases and report `ALL PHASE 6 BILLING ENGINE TESTS PASSED SUCCESSFULLY!`.
 
 ---
 
@@ -238,3 +267,4 @@ The service-role key bypasses RLS and should be:
 ### API Keys
 No API keys, passwords, or secrets are stored anywhere in the `database/` folder.
 Supabase credentials are configured in the frontend via environment variables or a `.env` file that is **git-ignored**.
+

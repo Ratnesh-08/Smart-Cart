@@ -309,3 +309,32 @@ CREATE POLICY "feedback_select_own"
 CREATE POLICY "feedback_admin_select"
     ON feedback FOR SELECT
     USING (is_admin());
+
+-- =============================================================
+-- PHASE 6 — BILLING ENGINE & RPC FUNCTION SECURITY
+-- =============================================================
+-- The following PL/pgSQL functions run with SECURITY DEFINER privileges
+-- to calculate totals and process checkouts atomically:
+--   - sync_cart_item_price_and_weight()
+--   - update_cart_totals(p_cart_id)
+--   - checkout_cart(p_cart_id, p_payment_method)
+--   - add_to_cart(p_cart_id, p_product_id, p_quantity)
+--   - remove_from_cart(p_cart_id, p_product_id)
+--   - set_cart_carry_bag(p_cart_id, p_bag_option_id, p_quantity)
+--
+-- Security Enforcement:
+-- 1. All functions check `v_cart.user_id = auth.uid() OR is_admin()`
+--    before allowing any mutation or checkout.
+-- 2. `sync_cart_item_price_and_weight` enforces that product price and weight
+--    are fetched from the authoritative `products` table, preventing client-side
+--    price tampering.
+-- 3. `checkout_cart` preserves product_name and unit_price as immutable snapshots
+--    in `order_items`.
+-- 4. Authenticated users are granted EXECUTE on these functions:
+GRANT EXECUTE ON FUNCTION sync_cart_item_price_and_weight() TO authenticated;
+GRANT EXECUTE ON FUNCTION update_cart_totals(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION checkout_cart(UUID, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION add_to_cart(UUID, UUID, INT) TO authenticated;
+GRANT EXECUTE ON FUNCTION remove_from_cart(UUID, UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION set_cart_carry_bag(UUID, UUID, INT) TO authenticated;
+

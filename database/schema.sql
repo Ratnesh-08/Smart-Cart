@@ -646,3 +646,46 @@ BEGIN
 END;
 $$;
 
+-- =============================================================
+-- 13. PHASE 7 — ADMIN PRODUCT & INVENTORY MANAGEMENT TRIGGER
+-- =============================================================
+-- Automatic inventory provisioning:
+--   When an admin inserts a new product into `products`, this trigger
+--   creates the required `inventory` row automatically with:
+--     stock_quantity = 0
+--     is_available   = TRUE
+--
+-- Uses ON CONFLICT (product_id) DO NOTHING so the trigger body is idempotent
+-- (safe if an inventory row already exists for this product).
+--
+-- Note: `is_available` is intentionally independent of `stock_quantity`.
+-- Admins control both fields separately through the `inventory` table.
+-- No automatic availability-sync trigger is added here.
+--
+-- Note on schema.sql vs migration:
+--   schema.sql is the full-reset reference (run on a fresh database).
+--   For an existing Phase 6 database, run migrations/002_phase7_admin_product_inventory.sql
+--   which uses a DO-block conditional CREATE TRIGGER instead of DROP+CREATE.
+-- =============================================================
+
+CREATE OR REPLACE FUNCTION auto_create_inventory_for_product()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    INSERT INTO public.inventory (product_id, stock_quantity, is_available)
+    VALUES (NEW.id, 0, TRUE)
+    ON CONFLICT (product_id) DO NOTHING;
+    RETURN NEW;
+END;
+$$;
+
+-- schema.sql is always run on a fresh/empty database, so DROP + CREATE
+-- is safe here. For incremental deployment, use the migration file instead.
+DROP TRIGGER IF EXISTS trg_auto_create_inventory ON products;
+CREATE TRIGGER trg_auto_create_inventory
+    AFTER INSERT ON products
+    FOR EACH ROW EXECUTE FUNCTION auto_create_inventory_for_product();
+

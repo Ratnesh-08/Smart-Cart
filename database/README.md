@@ -268,3 +268,91 @@ The service-role key bypasses RLS and should be:
 No API keys, passwords, or secrets are stored anywhere in the `database/` folder.
 Supabase credentials are configured in the frontend via environment variables or a `.env` file that is **git-ignored**.
 
+---
+
+## Phase 7 — Admin Product & Inventory Management
+
+### What was added
+
+Phase 7 adds **one new database change**: an automatic inventory provisioning trigger. All other admin product and inventory management capabilities (RLS, role enforcement, constraints) already existed from Phases 3–6.
+
+#### Automatic Inventory Provisioning Trigger
+
+**Function:** `auto_create_inventory_for_product()` (SECURITY DEFINER, `schema.sql` Section 13)
+**Trigger:** `trg_auto_create_inventory` — fires `AFTER INSERT ON products`, once per row
+
+When an admin inserts a new product:
+- A corresponding `inventory` row is automatically created with `stock_quantity = 0` and `is_available = TRUE`.
+- Uses `ON CONFLICT (product_id) DO NOTHING` — idempotent and safe to re-run.
+- Declared `SECURITY DEFINER` so the trigger can write to `inventory` regardless of the calling role's grants.
+- `SET search_path = public` prevents search_path injection.
+- This is a trigger function — it **cannot** be called directly by clients. No `GRANT EXECUTE` is issued.
+
+#### Independent Availability Control
+
+`inventory.is_available` is **intentionally independent** of `stock_quantity`. Admins control both fields separately:
+- A product can be `is_available = FALSE` even with stock > 0 (e.g., recalled, temporarily hidden).
+- A product can be `is_available = TRUE` even with stock = 0 (e.g., pre-order, expected restock).
+- **No automatic availability-sync trigger exists** — this is by design.
+
+### Existing RLS that covers Phase 7 (no new policies needed)
+
+| Policy | Table | Effect |
+|--------|-------|--------|
+| `products_admin_all` | `products` | Only `admin`/`superadmin` can INSERT, UPDATE, DELETE |
+| `products_select_active` | `products` | Customers can only SELECT `is_active = TRUE` products |
+| `inventory_admin_all` | `inventory` | Only `admin`/`superadmin` can UPDATE, DELETE |
+| `inventory_select_customers` | `inventory` | Customers can only SELECT inventory for active products |
+| `profiles_update_own` (WITH CHECK) | `profiles` | Customers cannot elevate their own `role` |
+| `profiles_superadmin_update` | `profiles` | Only `superadmin` can change any user's role |
+
+### Migration File
+
+`migrations/002_phase7_admin_product_inventory.sql`
+
+Run this in the Supabase SQL Editor on an existing database (after `001_phase6_billing_engine.sql`):
+
+```
+migrations/002_phase7_admin_product_inventory.sql
+```
+
+### Test Suite
+
+`tests/phase7_admin_tests.sql` — 20 tests covering:
+
+| Test | Area |
+|------|------|
+| 1 | Product creation — all fields persist correctly |
+| 2 | Auto inventory provisioning on product insert |
+| 3 | Idempotency — no duplicate inventory rows |
+| 4 | Admin product name update |
+| 5 | Admin product price update |
+| 6 | Admin expected_weight update |
+| 7 | Admin barcode update |
+| 8 | Admin deactivate/reactivate product |
+| 9 | Duplicate barcode rejected (UNIQUE constraint) |
+| 10 | Negative price rejected (CHECK constraint) |
+| 11 | Negative expected_weight rejected (CHECK constraint) |
+| 12 | Admin stock_quantity update |
+| 13 | Negative stock_quantity rejected (CHECK constraint) |
+| 14 | `is_available` independently controllable (no auto-sync) |
+| 15 | RLS policies present for products |
+| 16 | RLS policies present for inventory |
+| 17 | Role self-promotion protection policies present |
+| 18 | Phase 6 billing trigger regression (price sync still works) |
+| 19 | Phase 6 `checkout_cart` regression |
+| 20 | Product delete cascades to inventory (ON DELETE CASCADE) |
+
+### Full Setup (Phase 7 included)
+
+Run in order in the Supabase SQL Editor:
+1. `schema.sql`
+2. `rls.sql`
+3. `seed.sql`
+
+### Incremental Migration (Existing Database — Phase 7 only)
+
+```
+migrations/002_phase7_admin_product_inventory.sql
+```
+

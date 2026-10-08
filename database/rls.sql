@@ -338,3 +338,24 @@ GRANT EXECUTE ON FUNCTION add_to_cart(UUID, UUID, INT) TO authenticated;
 GRANT EXECUTE ON FUNCTION remove_from_cart(UUID, UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION set_cart_carry_bag(UUID, UUID, INT) TO authenticated;
 
+-- =============================================================
+-- PHASE 7 — ADMIN PRODUCT & INVENTORY TRIGGER SECURITY
+-- =============================================================
+-- Function: auto_create_inventory_for_product()
+--   - Declared SECURITY DEFINER so it can INSERT into `inventory`
+--     even when the calling role only has INSERT on `products`.
+--   - SET search_path = public prevents search_path injection attacks.
+--   - This function is a TRIGGER function — it cannot be called directly
+--     by authenticated or anon users. No GRANT EXECUTE is needed or added.
+--
+-- RLS enforcement (all already in place from Phase 3–6):
+--   - products_admin_all  : only admin/superadmin can INSERT/UPDATE/DELETE products.
+--   - inventory_admin_all : only admin/superadmin can UPDATE/DELETE inventory.
+--   - customers cannot INSERT products (so trigger cannot be indirectly abused).
+--   - profiles_update_own WITH CHECK prevents customers from self-promoting to admin.
+--   - profiles_superadmin_update restricts role changes to superadmin only.
+--
+-- No new policies are required for Phase 7 — existing RLS fully covers
+-- the admin product and inventory management use cases.
+-- =============================================================
+

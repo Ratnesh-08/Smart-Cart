@@ -437,15 +437,26 @@ CREATE OR REPLACE FUNCTION checkout_cart(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
     v_cart RECORD;
     v_order_id UUID;
     v_order_number TEXT;
     v_item_count INTEGER;
+    v_caller_id UUID;
+    v_caller_is_admin BOOLEAN;
 BEGIN
     IF p_payment_method NOT IN ('cash', 'upi', 'card', 'demo') THEN
         RAISE EXCEPTION 'Invalid payment method: %', p_payment_method;
+    END IF;
+
+    -- Explicit Authentication Check
+    v_caller_id := auth.uid();
+    v_caller_is_admin := is_admin();
+
+    IF v_caller_id IS NULL AND NOT v_caller_is_admin THEN
+        RAISE EXCEPTION 'Unauthorized: Caller is not authenticated';
     END IF;
 
     SELECT * INTO v_cart
@@ -456,7 +467,7 @@ BEGIN
         RAISE EXCEPTION 'Cart % not found or is not active', p_cart_id;
     END IF;
 
-    IF v_cart.user_id <> auth.uid() AND NOT is_admin() THEN
+    IF (v_caller_id IS NULL OR v_cart.user_id <> v_caller_id) AND NOT v_caller_is_admin THEN
         RAISE EXCEPTION 'Unauthorized: You do not own cart %', p_cart_id;
     END IF;
 
@@ -550,10 +561,20 @@ CREATE OR REPLACE FUNCTION add_to_cart(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
     v_cart_user_id UUID;
+    v_caller_id UUID;
+    v_caller_is_admin BOOLEAN;
 BEGIN
+    v_caller_id := auth.uid();
+    v_caller_is_admin := is_admin();
+
+    IF v_caller_id IS NULL AND NOT v_caller_is_admin THEN
+        RAISE EXCEPTION 'Unauthorized: Caller is not authenticated';
+    END IF;
+
     SELECT user_id INTO v_cart_user_id
     FROM public.carts
     WHERE id = p_cart_id AND status = 'active';
@@ -562,7 +583,7 @@ BEGIN
         RAISE EXCEPTION 'Active cart % not found', p_cart_id;
     END IF;
 
-    IF v_cart_user_id <> auth.uid() AND NOT is_admin() THEN
+    IF (v_caller_id IS NULL OR v_cart_user_id <> v_caller_id) AND NOT v_caller_is_admin THEN
         RAISE EXCEPTION 'Unauthorized: Cannot modify cart %', p_cart_id;
     END IF;
 
@@ -586,10 +607,20 @@ CREATE OR REPLACE FUNCTION remove_from_cart(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
     v_cart_user_id UUID;
+    v_caller_id UUID;
+    v_caller_is_admin BOOLEAN;
 BEGIN
+    v_caller_id := auth.uid();
+    v_caller_is_admin := is_admin();
+
+    IF v_caller_id IS NULL AND NOT v_caller_is_admin THEN
+        RAISE EXCEPTION 'Unauthorized: Caller is not authenticated';
+    END IF;
+
     SELECT user_id INTO v_cart_user_id
     FROM public.carts
     WHERE id = p_cart_id AND status = 'active';
@@ -598,7 +629,7 @@ BEGIN
         RAISE EXCEPTION 'Active cart % not found', p_cart_id;
     END IF;
 
-    IF v_cart_user_id <> auth.uid() AND NOT is_admin() THEN
+    IF (v_caller_id IS NULL OR v_cart_user_id <> v_caller_id) AND NOT v_caller_is_admin THEN
         RAISE EXCEPTION 'Unauthorized: Cannot modify cart %', p_cart_id;
     END IF;
 
@@ -617,10 +648,20 @@ CREATE OR REPLACE FUNCTION set_cart_carry_bag(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
     v_cart_user_id UUID;
+    v_caller_id UUID;
+    v_caller_is_admin BOOLEAN;
 BEGIN
+    v_caller_id := auth.uid();
+    v_caller_is_admin := is_admin();
+
+    IF v_caller_id IS NULL AND NOT v_caller_is_admin THEN
+        RAISE EXCEPTION 'Unauthorized: Caller is not authenticated';
+    END IF;
+
     SELECT user_id INTO v_cart_user_id
     FROM public.carts
     WHERE id = p_cart_id AND status = 'active';
@@ -629,7 +670,7 @@ BEGIN
         RAISE EXCEPTION 'Active cart % not found', p_cart_id;
     END IF;
 
-    IF v_cart_user_id <> auth.uid() AND NOT is_admin() THEN
+    IF (v_caller_id IS NULL OR v_cart_user_id <> v_caller_id) AND NOT v_caller_is_admin THEN
         RAISE EXCEPTION 'Unauthorized: Cannot modify cart %', p_cart_id;
     END IF;
 

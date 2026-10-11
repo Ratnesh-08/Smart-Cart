@@ -1,7 +1,10 @@
 -- =============================================================
 -- Smart Cart AI — Test Suite: Phase 6 Cart & Billing Engine
 -- Platform  : Supabase (PostgreSQL 15+)
--- Description: Executes automated test assertions for all 15 Phase 6 requirements.
+-- Description: Executes automated test assertions for Phase 6 requirements,
+--              including cart RPC functions, billing calculations,
+--              carry-bag updates, snapshot immutability, transactional integrity,
+--              and strict authentication & cart ownership isolation.
 -- Run in Supabase SQL Editor.
 -- =============================================================
 
@@ -19,6 +22,8 @@ DECLARE
     v_cart_rec RECORD;
     v_order_rec RECORD;
     v_order_item_rec RECORD;
+    v_order_count_before INT;
+    v_order_count_after INT;
     v_checkout_res JSONB;
     v_err_caught BOOLEAN := FALSE;
 BEGIN
@@ -47,7 +52,8 @@ BEGIN
         (v_prod_b_id, '9990000000002', 'Test Product B', 'Test item B', 'Test', 50.00, 100.0, 'pcs', v_location_id, TRUE);
 
     INSERT INTO public.inventory (product_id, stock_quantity, is_available)
-    VALUES (v_prod_a_id, 100, TRUE), (v_prod_b_id, 100, TRUE);
+    VALUES (v_prod_a_id, 100, TRUE), (v_prod_b_id, 100, TRUE)
+    ON CONFLICT (product_id) DO UPDATE SET stock_quantity = 100, is_available = TRUE;
 
     -- Insert test carry bag option (5.00 INR)
     INSERT INTO public.carry_bag_options (id, name, price, is_active)
@@ -58,13 +64,14 @@ BEGIN
     INSERT INTO public.carts (id, user_id, status) VALUES (v_cart_b_id, v_user_b, 'active');
 
     -- -------------------------------------------------------------
-    -- TEST 1: EMPTY CART
+    -- TEST 1: EMPTY CART & CHECKOUT PREVENTION
     -- -------------------------------------------------------------
     SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_a_id;
     ASSERT v_cart_rec.subtotal = 0.00, 'TEST 1 FAILED: Empty cart subtotal should be 0.00';
     ASSERT v_cart_rec.total = 0.00, 'TEST 1 FAILED: Empty cart total should be 0.00';
 
-    -- Attempt checkout on empty cart should fail
+    -- Attempt checkout on empty cart (as User A) should fail
+    PERFORM set_config('request.jwt.claims', json_build_object('sub', v_user_a::text)::text, true);
     v_err_caught := FALSE;
     BEGIN
         PERFORM checkout_cart(v_cart_a_id, 'cash');
@@ -75,19 +82,21 @@ BEGIN
     RAISE NOTICE '✓ TEST 1 PASSED: Empty cart subtotal/total are 0 and checkout is prevented';
 
     -- -------------------------------------------------------------
-    -- TEST 2: ONE PRODUCT ADDITION & PRICE SYNC
+    -- TEST 2: ADDING A VALID PRODUCT VIA add_to_cart RPC & PRICE SYNC
     -- -------------------------------------------------------------
-    INSERT INTO public.cart_items (cart_id, product_id, quantity) VALUES (v_cart_a_id, v_prod_a_id, 1);
+    -- Simulate authenticated User A calling add_to_cart
+    PERFORM set_config('request.jwt.claims', json_build_object('sub', v_user_a::text)::text, true);
+    PERFORM add_to_cart(v_cart_a_id, v_prod_a_id, 1);
     
     SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_a_id;
     ASSERT v_cart_rec.subtotal = 100.00, 'TEST 2 FAILED: Cart subtotal should be 100.00';
     ASSERT v_cart_rec.total = 100.00, 'TEST 2 FAILED: Cart total should be 100.00';
-    RAISE NOTICE '✓ TEST 2 PASSED: Adding 1 product calculates subtotal = 100.00 & total = 100.00';
+    RAISE NOTICE '✓ TEST 2 PASSED: add_to_cart adds 1 product and calculates subtotal = 100.00 & total = 100.00';
 
     -- -------------------------------------------------------------
     -- TEST 3: MULTIPLE DIFFERENT PRODUCTS
     -- -------------------------------------------------------------
-    INSERT INTO public.cart_items (cart_id, product_id, quantity) VALUES (v_cart_a_id, v_prod_b_id, 2);
+    PERFORM add_to_cart(v_cart_a_id, v_prod_b_id, 2);
     
     -- Subtotal should be: (1 * 100.00) + (2 * 50.00) = 200.00
     SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_a_id;
@@ -96,19 +105,19 @@ BEGIN
     RAISE NOTICE '✓ TEST 3 PASSED: Multiple products calculate subtotal = 200.00';
 
     -- -------------------------------------------------------------
-    -- TEST 4: DUPLICATE PRODUCT / QUANTITY UPDATE
+    -- TEST 4: ADDING THE SAME PRODUCT AGAIN (QUANTITY INCREMENT)
     -- -------------------------------------------------------------
-    UPDATE public.cart_items SET quantity = quantity + 1 WHERE cart_id = v_cart_a_id AND product_id = v_prod_a_id;
+    PERFORM add_to_cart(v_cart_a_id, v_prod_a_id, 1);
     
     -- Subtotal should be: (2 * 100.00) + (2 * 50.00) = 300.00
     SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_a_id;
-    ASSERT v_cart_rec.subtotal = 300.00, 'TEST 4 FAILED: Subtotal after quantity update should be 300.00';
-    RAISE NOTICE '✓ TEST 4 PASSED: Quantity update recalculates subtotal = 300.00';
+    ASSERT v_cart_rec.subtotal = 300.00, 'TEST 4 FAILED: Subtotal after adding existing product should be 300.00';
+    RAISE NOTICE '✓ TEST 4 PASSED: Re-adding existing product increments quantity and recalculates subtotal = 300.00';
 
     -- -------------------------------------------------------------
-    -- TEST 5: REMOVING AN ITEM
+    -- TEST 5: REMOVING AN ITEM VIA remove_from_cart RPC
     -- -------------------------------------------------------------
-    DELETE FROM public.cart_items WHERE cart_id = v_cart_a_id AND product_id = v_prod_b_id;
+    PERFORM remove_from_cart(v_cart_a_id, v_prod_b_id);
     
     -- Subtotal should be: 2 * 100.00 = 200.00
     SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_a_id;
@@ -116,16 +125,16 @@ BEGIN
     RAISE NOTICE '✓ TEST 5 PASSED: Removing item reduces subtotal to 200.00';
 
     -- -------------------------------------------------------------
-    -- TEST 6 & 7: CARRY BAG QUANTITY 0 AND > 0
+    -- TEST 6 & 7: CARRY BAG SELECTION VIA set_cart_carry_bag RPC (QTY 0 AND > 0)
     -- -------------------------------------------------------------
     -- Set bag with qty 0
-    UPDATE public.carts SET carry_bag_option_id = v_bag_id, carry_bag_quantity = 0 WHERE id = v_cart_a_id;
+    PERFORM set_cart_carry_bag(v_cart_a_id, v_bag_id, 0);
     SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_a_id;
     ASSERT v_cart_rec.carry_bag_charge = 0.00, 'TEST 6 FAILED: Carry bag charge should be 0.00 when qty = 0';
     ASSERT v_cart_rec.total = 200.00, 'TEST 6 FAILED: Total should be 200.00 when bag qty = 0';
 
     -- Set bag with qty 2 (2 * 5.00 = 10.00)
-    UPDATE public.carts SET carry_bag_option_id = v_bag_id, carry_bag_quantity = 2 WHERE id = v_cart_a_id;
+    PERFORM set_cart_carry_bag(v_cart_a_id, v_bag_id, 2);
     SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_a_id;
     ASSERT v_cart_rec.carry_bag_charge = 10.00, 'TEST 7 FAILED: Carry bag charge should be 10.00 when qty = 2';
     ASSERT v_cart_rec.total = 210.00, 'TEST 7 FAILED: Total should be 210.00 (200.00 subtotal + 10.00 bag charge)';
@@ -139,8 +148,9 @@ BEGIN
     RAISE NOTICE '✓ TEST 8 & 9 PASSED: Subtotal and total match exact billing rules';
 
     -- -------------------------------------------------------------
-    -- TEST 10: CHECKOUT & ORDER CREATION
+    -- TEST 10: SUCCESSFUL CHECKOUT FOR AUTHORIZED CUSTOMER A
     -- -------------------------------------------------------------
+    PERFORM set_config('request.jwt.claims', json_build_object('sub', v_user_a::text)::text, true);
     v_checkout_res := checkout_cart(v_cart_a_id, 'upi');
     ASSERT (v_checkout_res->>'success')::BOOLEAN = TRUE, 'TEST 10 FAILED: Checkout failed';
     
@@ -183,33 +193,128 @@ BEGIN
     RAISE NOTICE '✓ TEST 12 PASSED: Invalid item quantity (<= 0) is rejected by triggers/constraints';
 
     -- -------------------------------------------------------------
-    -- TEST 13: INVALID PRICE MANIPULATION PREVENTION
+    -- TEST 13: INVALID PRICE MANIPULATION OVERRIDDEN BY PRODUCTS TABLE
     -- -------------------------------------------------------------
-    -- Attempt inserting item with manipulated unit_price = 0.01 (real price is 999.00 now)
+    -- Attempt inserting item with manipulated unit_price = 0.01 (authoritative price is 999.00 now)
     INSERT INTO public.cart_items (cart_id, product_id, quantity, unit_price) VALUES (v_cart_b_id, v_prod_a_id, 1, 0.01);
     
     SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_b_id;
-    -- Trigger sync_cart_item_price_and_weight should overwrite unit_price to 999.00
+    -- Trigger sync_cart_item_price_and_weight must overwrite unit_price to 999.00
     ASSERT v_cart_rec.subtotal = 999.00, 'TEST 13 FAILED: Unit price manipulation was not prevented by trigger';
     RAISE NOTICE '✓ TEST 13 PASSED: Client unit price manipulation is overridden by database products table';
 
     -- -------------------------------------------------------------
-    -- TEST 14: CUSTOMER ISOLATION THROUGH RLS / FUNCTION CHECKS
+    -- TEST 14: CROSS-CUSTOMER ACCESS REJECTION (USER A -> USER B'S CART)
     -- -------------------------------------------------------------
-    -- Attempt checking out User B's cart while auth.uid() is null / unauthorized
+    -- Customer A attempts to checkout Customer B's cart
+    PERFORM set_config('request.jwt.claims', json_build_object('sub', v_user_a::text)::text, true);
     v_err_caught := FALSE;
     BEGIN
         PERFORM checkout_cart(v_cart_b_id, 'cash');
     EXCEPTION WHEN OTHERS THEN
         v_err_caught := TRUE;
     END;
-    -- checkout_cart enforces user_id = auth.uid() OR is_admin()
-    ASSERT v_err_caught = TRUE, 'TEST 14 FAILED: Unauthorized checkout was allowed!';
-    RAISE NOTICE '✓ TEST 14 PASSED: Customer isolation & unauthorized cart access prevention verified';
+    ASSERT v_err_caught = TRUE, 'TEST 14 FAILED: Cross-customer checkout was allowed!';
+
+    -- Customer A attempts to add_to_cart on Customer B's cart
+    v_err_caught := FALSE;
+    BEGIN
+        PERFORM add_to_cart(v_cart_b_id, v_prod_b_id, 1);
+    EXCEPTION WHEN OTHERS THEN
+        v_err_caught := TRUE;
+    END;
+    ASSERT v_err_caught = TRUE, 'TEST 14 FAILED: Cross-customer add_to_cart was allowed!';
+
+    -- Customer A attempts to set_cart_carry_bag on Customer B's cart
+    v_err_caught := FALSE;
+    BEGIN
+        PERFORM set_cart_carry_bag(v_cart_b_id, v_bag_id, 1);
+    EXCEPTION WHEN OTHERS THEN
+        v_err_caught := TRUE;
+    END;
+    ASSERT v_err_caught = TRUE, 'TEST 14 FAILED: Cross-customer set_cart_carry_bag was allowed!';
+
+    -- Customer A attempts to remove_from_cart on Customer B's cart
+    v_err_caught := FALSE;
+    BEGIN
+        PERFORM remove_from_cart(v_cart_b_id, v_prod_a_id);
+    EXCEPTION WHEN OTHERS THEN
+        v_err_caught := TRUE;
+    END;
+    ASSERT v_err_caught = TRUE, 'TEST 14 FAILED: Cross-customer remove_from_cart was allowed!';
+    RAISE NOTICE '✓ TEST 14 PASSED: Customer A is rejected when attempting any RPC operation on Customer B''s cart';
+
+    -- -------------------------------------------------------------
+    -- TEST 15: UNAUTHENTICATED CALLER REJECTION (auth.uid() IS NULL)
+    -- -------------------------------------------------------------
+    -- Reset JWT claims so auth.uid() returns NULL
+    PERFORM set_config('request.jwt.claims', '', true);
+    
+    -- Unauthenticated checkout_cart
+    v_err_caught := FALSE;
+    BEGIN
+        PERFORM checkout_cart(v_cart_b_id, 'cash');
+    EXCEPTION WHEN OTHERS THEN
+        v_err_caught := TRUE;
+    END;
+    ASSERT v_err_caught = TRUE, 'TEST 15 FAILED: Unauthenticated checkout_cart was allowed!';
+
+    -- Unauthenticated add_to_cart
+    v_err_caught := FALSE;
+    BEGIN
+        PERFORM add_to_cart(v_cart_b_id, v_prod_b_id, 1);
+    EXCEPTION WHEN OTHERS THEN
+        v_err_caught := TRUE;
+    END;
+    ASSERT v_err_caught = TRUE, 'TEST 15 FAILED: Unauthenticated add_to_cart was allowed!';
+
+    -- Unauthenticated remove_from_cart
+    v_err_caught := FALSE;
+    BEGIN
+        PERFORM remove_from_cart(v_cart_b_id, v_prod_a_id);
+    EXCEPTION WHEN OTHERS THEN
+        v_err_caught := TRUE;
+    END;
+    ASSERT v_err_caught = TRUE, 'TEST 15 FAILED: Unauthenticated remove_from_cart was allowed!';
+
+    -- Unauthenticated set_cart_carry_bag
+    v_err_caught := FALSE;
+    BEGIN
+        PERFORM set_cart_carry_bag(v_cart_b_id, v_bag_id, 1);
+    EXCEPTION WHEN OTHERS THEN
+        v_err_caught := TRUE;
+    END;
+    ASSERT v_err_caught = TRUE, 'TEST 15 FAILED: Unauthenticated set_cart_carry_bag was allowed!';
+    RAISE NOTICE '✓ TEST 15 PASSED: Unauthenticated caller (auth.uid() IS NULL) is rejected across all cart RPCs';
+
+    -- -------------------------------------------------------------
+    -- TEST 16: TRANSACTION ROLLBACK & INTEGRITY ON REJECTED CHECKOUT
+    -- -------------------------------------------------------------
+    SELECT COUNT(*) INTO v_order_count_before FROM public.orders WHERE cart_id = v_cart_b_id;
+    
+    -- Attempt failed checkout with invalid payment method
+    PERFORM set_config('request.jwt.claims', json_build_object('sub', v_user_b::text)::text, true);
+    v_err_caught := FALSE;
+    BEGIN
+        PERFORM checkout_cart(v_cart_b_id, 'invalid_payment_method');
+    EXCEPTION WHEN OTHERS THEN
+        v_err_caught := TRUE;
+    END;
+    ASSERT v_err_caught = TRUE, 'TEST 16 FAILED: Invalid payment method should fail';
+
+    SELECT COUNT(*) INTO v_order_count_after FROM public.orders WHERE cart_id = v_cart_b_id;
+    ASSERT v_order_count_before = v_order_count_after, 'TEST 16 FAILED: Partial order was created during failed checkout!';
+
+    SELECT status INTO v_cart_rec FROM public.carts WHERE id = v_cart_b_id;
+    ASSERT v_cart_rec.status = 'active', 'TEST 16 FAILED: Cart status was mutated during failed checkout!';
+    RAISE NOTICE '✓ TEST 16 PASSED: Transaction rollback verified — no partial orders or corrupted cart status';
 
     -- -------------------------------------------------------------
     -- CLEANUP TEST FIXTURES
     -- -------------------------------------------------------------
+    -- Reset JWT claims back to default
+    PERFORM set_config('request.jwt.claims', '', true);
+
     DELETE FROM public.orders WHERE cart_id IN (v_cart_a_id, v_cart_b_id);
     DELETE FROM public.cart_items WHERE cart_id IN (v_cart_a_id, v_cart_b_id);
     DELETE FROM public.carts WHERE id IN (v_cart_a_id, v_cart_b_id);

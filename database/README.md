@@ -233,12 +233,13 @@ Run the files in order in the Supabase SQL Editor:
 
 ### Incremental Migration (Existing Database)
 
-Run the migration script in the Supabase SQL Editor:
+Run the migration scripts in order in the Supabase SQL Editor:
 - `migrations/001_phase6_billing_engine.sql`
+- `migrations/003_phase6_auth_security_fix.sql` (Hardens cart ownership and explicit authentication checks)
 
 ### Running Test Suite
 
-To verify all 15 Phase 6 requirements, run:
+To verify all Phase 6 requirements, run:
 - `tests/phase6_billing_tests.sql`
 
 Output will display `✓ TEST N PASSED` for all test cases and report `ALL PHASE 6 BILLING ENGINE TESTS PASSED SUCCESSFULLY!`.

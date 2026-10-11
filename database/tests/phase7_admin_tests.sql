@@ -1,15 +1,28 @@
 -- =============================================================
 -- Smart Cart AI — Test Suite: Phase 7 Admin Product & Inventory
 -- Platform  : Supabase (PostgreSQL 15+)
--- Description: Automated test assertions for all Phase 7 requirements:
+-- Description: Automated test assertions for Phase 7 requirements:
 --              product CRUD, inventory auto-provisioning, constraint
---              validation, security/customer isolation, and Phase 6
---              billing regression.
--- Run in Supabase SQL Editor (as a superuser / service-role session).
+--              validation, administrative inventory control, Phase 6
+--              checkout regression (with simulated admin JWT context),
+--              and schema cascade verification.
+--
+-- Execution context: Supabase SQL Editor.
+--
+-- Transaction-Safe Test Design:
+-- 1. All fixture records are inserted using deterministic, isolated test UUIDs.
+-- 2. If all assertions pass, explicit targeted DELETE statements remove the
+--    test fixtures at the end of the block.
+-- 3. If any assertion fails or an unexpected exception occurs, re-raising the
+--    exception aborts the execution block, causing PostgreSQL to automatically
+--    ROLL BACK all uncommitted database changes made by this script.
+--    No orphaned fixture data can persist in the database.
+-- 4. Real application products, inventory, users, carts, or orders are never touched.
 -- =============================================================
 
 DO $$
 DECLARE
+    -- Isolated UUIDs for test fixtures
     v_admin_id    UUID := gen_random_uuid();
     v_customer_id UUID := gen_random_uuid();
     v_location_id UUID := gen_random_uuid();
@@ -32,24 +45,30 @@ BEGIN
     -- -------------------------------------------------------------------
     -- SETUP TEST FIXTURES
     -- -------------------------------------------------------------------
+    -- Required auth.users columns: id, email
     INSERT INTO auth.users (id, email) VALUES
-        (v_admin_id,    'test_admin@smartcart.local'),
-        (v_customer_id, 'test_cust@smartcart.local')
-    ON CONFLICT DO NOTHING;
-
-    INSERT INTO public.profiles (id, full_name, role) VALUES
-        (v_admin_id,    'Test Admin',    'admin'),
-        (v_customer_id, 'Test Customer', 'customer')
+        (v_admin_id,    'test_admin_p7@smartcart.local'),
+        (v_customer_id, 'test_cust_p7@smartcart.local')
     ON CONFLICT (id) DO NOTHING;
 
-    INSERT INTO public.store_locations (id, location_name, aisle, section, shelf, map_x, map_y)
-    VALUES (v_location_id, 'Test Aisle P7', 'Aisle P7', 'Phase7', 'Shelf A', 10, 10);
+    -- Required profiles columns: id (matches auth.users.id), full_name, role, is_active
+    INSERT INTO public.profiles (id, full_name, role, is_active) VALUES
+        (v_admin_id,    'Test Admin P7',    'admin',    TRUE),
+        (v_customer_id, 'Test Customer P7', 'customer', TRUE)
+    ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, is_active = EXCLUDED.is_active;
 
+    -- Required store_locations columns: id, location_name, aisle, section, shelf, map_x, map_y, is_active
+    INSERT INTO public.store_locations (id, location_name, aisle, section, shelf, map_x, map_y, is_active)
+    VALUES (v_location_id, 'Test Aisle P7', 'Aisle P7', 'Phase7', 'Shelf A', 10, 10, TRUE);
+
+    -- Required carry_bag_options columns: id, name, price, is_active
     INSERT INTO public.carry_bag_options (id, name, price, is_active)
     VALUES (v_bag_id, 'P7 Test Bag', 3.00, TRUE);
 
     -- -------------------------------------------------------------------
     -- TEST 1: PRODUCT CREATION (ADMIN INSERT)
+    -- Required products columns: id, barcode, name, description, category,
+    -- price, expected_weight, unit, location_id, is_active
     -- -------------------------------------------------------------------
     INSERT INTO public.products (
         id, barcode, name, description, category,
@@ -60,26 +79,33 @@ BEGIN
     );
 
     SELECT * INTO v_prod_rec FROM public.products WHERE id = v_prod_id;
-    ASSERT v_prod_rec.id IS NOT NULL,          'TEST 1 FAILED: Product was not inserted';
-    ASSERT v_prod_rec.price = 75.00,           'TEST 1 FAILED: Price mismatch after insert';
-    ASSERT v_prod_rec.expected_weight = 150.0, 'TEST 1 FAILED: Expected weight mismatch';
-    ASSERT v_prod_rec.barcode = '8880000000001', 'TEST 1 FAILED: Barcode mismatch';
-    ASSERT v_prod_rec.is_active = TRUE,        'TEST 1 FAILED: is_active should default TRUE';
+    ASSERT v_prod_rec.id IS NOT NULL,             'TEST 1 FAILED: Product was not inserted';
+    ASSERT v_prod_rec.price = 75.00,              'TEST 1 FAILED: Price mismatch after insert';
+    ASSERT v_prod_rec.expected_weight = 150.0,    'TEST 1 FAILED: Expected weight mismatch';
+    ASSERT v_prod_rec.barcode = '8880000000001',  'TEST 1 FAILED: Barcode mismatch';
+    ASSERT v_prod_rec.is_active = TRUE,           'TEST 1 FAILED: is_active should default TRUE';
     RAISE NOTICE '✓ TEST 1 PASSED: Admin product creation stores all fields correctly';
 
     -- -------------------------------------------------------------------
     -- TEST 2: AUTO INVENTORY PROVISIONING ON PRODUCT INSERT
     -- -------------------------------------------------------------------
     SELECT * INTO v_inv_rec FROM public.inventory WHERE product_id = v_prod_id;
-    ASSERT v_inv_rec.product_id IS NOT NULL,    'TEST 2 FAILED: Inventory row was NOT auto-created';
-    ASSERT v_inv_rec.stock_quantity = 0,        'TEST 2 FAILED: Default stock_quantity should be 0';
-    ASSERT v_inv_rec.is_available = TRUE,       'TEST 2 FAILED: Default is_available should be TRUE';
+    ASSERT v_inv_rec.product_id IS NOT NULL, 'TEST 2 FAILED: Inventory row was NOT auto-created';
+    ASSERT v_inv_rec.stock_quantity = 0,     'TEST 2 FAILED: Default stock_quantity should be 0';
+    ASSERT v_inv_rec.is_available = TRUE,    'TEST 2 FAILED: Default is_available should be TRUE';
     RAISE NOTICE '✓ TEST 2 PASSED: trg_auto_create_inventory fired and created inventory row (qty=0, available=TRUE)';
 
     -- -------------------------------------------------------------------
-    -- TEST 3: NO DUPLICATE INVENTORY ROW (IDEMPOTENCY)
+    -- TEST 3: NO DUPLICATE INVENTORY ROW (IDEMPOTENCY & NON-MUTATION)
     -- -------------------------------------------------------------------
-    -- Simulate re-running the trigger logic (ON CONFLICT DO NOTHING)
+    -- 3a: Verify exactly 1 inventory row exists for this product
+    SELECT COUNT(*) INTO v_inv_count FROM public.inventory WHERE product_id = v_prod_id;
+    ASSERT v_inv_count = 1, 'TEST 3 FAILED: Initial inventory count is not 1';
+
+    -- 3b: Set stock to 25 to verify ON CONFLICT DO NOTHING does not overwrite existing values
+    UPDATE public.inventory SET stock_quantity = 25 WHERE product_id = v_prod_id;
+
+    -- 3c: Execute trigger logic via duplicate conflict insert
     INSERT INTO public.inventory (product_id, stock_quantity, is_available)
     VALUES (v_prod_id, 999, FALSE)
     ON CONFLICT (product_id) DO NOTHING;
@@ -87,9 +113,10 @@ BEGIN
     SELECT COUNT(*) INTO v_inv_count FROM public.inventory WHERE product_id = v_prod_id;
     ASSERT v_inv_count = 1, 'TEST 3 FAILED: Duplicate inventory row was created!';
 
-    SELECT stock_quantity INTO v_inv_rec FROM public.inventory WHERE product_id = v_prod_id;
-    ASSERT v_inv_rec.stock_quantity = 0, 'TEST 3 FAILED: ON CONFLICT mutated existing inventory row';
-    RAISE NOTICE '✓ TEST 3 PASSED: Auto-inventory trigger is idempotent — no duplicate rows created';
+    SELECT stock_quantity, is_available INTO v_inv_rec FROM public.inventory WHERE product_id = v_prod_id;
+    ASSERT v_inv_rec.stock_quantity = 25, 'TEST 3 FAILED: ON CONFLICT mutated existing stock_quantity!';
+    ASSERT v_inv_rec.is_available = TRUE, 'TEST 3 FAILED: ON CONFLICT mutated existing is_available!';
+    RAISE NOTICE '✓ TEST 3 PASSED: Auto-inventory trigger is idempotent — exactly 1 row exists and existing row is not overwritten';
 
     -- -------------------------------------------------------------------
     -- TEST 4: ADMIN CAN UPDATE PRODUCT NAME
@@ -229,12 +256,13 @@ BEGIN
     RAISE NOTICE '✓ TEST 14 PASSED: is_available is independent of stock_quantity — no auto-sync trigger interferes';
 
     -- -------------------------------------------------------------------
-    -- TEST 15 (SECURITY): CUSTOMER CANNOT INSERT A PRODUCT
+    -- TEST 15 (POLICY DEFINITION CHECK): PRODUCTS RLS POLICIES EXIST IN CATALOG
+    -- Note: When running tests as a privileged SQL Editor connection (postgres/service_role),
+    -- table RLS is bypassed by PostgreSQL superuser privileges. This test checks
+    -- pg_policies to confirm policy definitions exist in the database catalog.
+    -- It does NOT prove customer access denial at runtime; proving runtime RLS enforcement
+    -- requires testing from an authenticated client connection using anon/authenticated bearer tokens.
     -- -------------------------------------------------------------------
-    -- This assertion validates the RLS policy (products_admin_all covers INSERT).
-    -- In a SQL Editor session running as service_role, direct INSERT is allowed —
-    -- the policy is enforced at the authenticated client level. We verify the
-    -- policy exists rather than simulating the RLS session switch here.
     DECLARE
         v_policy_count INT;
     BEGIN
@@ -243,12 +271,13 @@ BEGIN
         WHERE tablename = 'products'
           AND policyname IN ('products_admin_all', 'products_select_active');
         ASSERT v_policy_count >= 2,
-            'TEST 15 FAILED: Expected RLS policies for products are missing!';
-        RAISE NOTICE '✓ TEST 15 PASSED: RLS policies products_admin_all and products_select_active are present';
+            'TEST 15 FAILED: Expected RLS policies for products are missing in pg_policies!';
+        RAISE NOTICE '✓ TEST 15 PASSED: RLS policies products_admin_all and products_select_active are defined in catalog';
     END;
 
     -- -------------------------------------------------------------------
-    -- TEST 16 (SECURITY): CUSTOMER CANNOT MODIFY INVENTORY
+    -- TEST 16 (POLICY DEFINITION CHECK): INVENTORY RLS POLICIES EXIST IN CATALOG
+    -- Note: Policy definition check in catalog (see Test 15 note).
     -- -------------------------------------------------------------------
     DECLARE
         v_inv_policy_count INT;
@@ -258,12 +287,13 @@ BEGIN
         WHERE tablename = 'inventory'
           AND policyname IN ('inventory_admin_all', 'inventory_select_customers');
         ASSERT v_inv_policy_count >= 2,
-            'TEST 16 FAILED: Expected RLS policies for inventory are missing!';
-        RAISE NOTICE '✓ TEST 16 PASSED: RLS policies inventory_admin_all and inventory_select_customers are present';
+            'TEST 16 FAILED: Expected RLS policies for inventory are missing in pg_policies!';
+        RAISE NOTICE '✓ TEST 16 PASSED: RLS policies inventory_admin_all and inventory_select_customers are defined in catalog';
     END;
 
     -- -------------------------------------------------------------------
-    -- TEST 17 (SECURITY): CUSTOMER CANNOT SELF-PROMOTE ROLE
+    -- TEST 17 (POLICY DEFINITION CHECK): PROFILE ROLE RESTRICTION POLICIES EXIST IN CATALOG
+    -- Note: Policy definition check in catalog (see Test 15 note).
     -- -------------------------------------------------------------------
     DECLARE
         v_role_policy_count INT;
@@ -273,13 +303,13 @@ BEGIN
         WHERE tablename = 'profiles'
           AND policyname IN ('profiles_update_own', 'profiles_superadmin_update');
         ASSERT v_role_policy_count >= 2,
-            'TEST 17 FAILED: Role protection policies on profiles are missing!';
-        RAISE NOTICE '✓ TEST 17 PASSED: Role self-promotion protection policies are present';
+            'TEST 17 FAILED: Role protection policies on profiles are missing in pg_policies!';
+        RAISE NOTICE '✓ TEST 17 PASSED: Role self-promotion protection policies are defined in catalog';
     END;
 
     -- -------------------------------------------------------------------
     -- TEST 18 (REGRESSION — PHASE 6): BILLING TRIGGER STILL WORKS
-    --   After Phase 7 changes, cart_items price-sync trigger must still fire
+    --   Verify cart_items price and weight sync triggers fire as expected.
     -- -------------------------------------------------------------------
     -- Insert second product for billing regression
     INSERT INTO public.products (
@@ -289,15 +319,15 @@ BEGIN
         v_prod_b_id, '8880000000002', 'P7 Test Product Beta', 'Phase 7 regression item',
         'TestCategory', 60.00, 100.0, 'pcs', v_location_id, TRUE
     );
-    -- inventory auto-created by trigger (stock=0); bump it for checkout
-    UPDATE public.inventory SET stock_quantity = 100 WHERE product_id IN (v_prod_id, v_prod_b_id);
-    UPDATE public.inventory SET is_available = TRUE WHERE product_id IN (v_prod_id, v_prod_b_id);
-    -- Update v_prod_id price back to known value for billing test
+    -- Bump stock for checkout
+    UPDATE public.inventory SET stock_quantity = 100, is_available = TRUE WHERE product_id IN (v_prod_id, v_prod_b_id);
+    -- Reset v_prod_id price to known value
     UPDATE public.products SET price = 75.00 WHERE id = v_prod_id;
 
+    -- Create test cart with all required columns: id, user_id, status
     INSERT INTO public.carts (id, user_id, status) VALUES (v_cart_id, v_admin_id, 'active');
 
-    -- Add item with a tampered unit_price — trigger must override to 75.00
+    -- Add item with tampered unit_price (0.01) — trigger must override to 75.00
     INSERT INTO public.cart_items (cart_id, product_id, quantity, unit_price)
     VALUES (v_cart_id, v_prod_id, 2, 0.01);
 
@@ -307,25 +337,44 @@ BEGIN
     RAISE NOTICE '✓ TEST 18 PASSED: Phase 6 billing trigger still correct after Phase 7 (subtotal = 150.00)';
 
     -- -------------------------------------------------------------------
-    -- TEST 19 (REGRESSION — PHASE 6): CHECKOUT_CART STILL WORKS
+    -- TEST 19 (REGRESSION — PHASE 6 & MIGRATION 003): CHECKOUT_CART UNDER AUTH CONTEXT
+    -- Note on Simulation Limits:
+    -- In Supabase PostgreSQL, auth.uid() reads (nullif(current_setting('request.jwt.claim.sub', true), ''))::uuid
+    -- or (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')::uuid.
+    -- Calling set_config('request.jwt.claims', ..., true) sets this session setting.
+    -- is_admin() then queries public.profiles where id = auth.uid() and role IN ('admin', 'superadmin').
+    -- Because v_admin_id has role='admin' in public.profiles, is_admin() evaluates to TRUE.
+    -- This tests PL/pgSQL function authorization logic in SQL Editor, but does NOT simulate
+    -- the HTTP PostgREST gateway, JWT cryptographic signature verification, or token expiry.
     -- -------------------------------------------------------------------
+    PERFORM set_config('request.jwt.claims', json_build_object('sub', v_admin_id::text)::text, true);
+
     v_checkout_res := checkout_cart(v_cart_id, 'cash');
     ASSERT (v_checkout_res->>'success')::BOOLEAN = TRUE,
-        'TEST 19 FAILED: checkout_cart failed after Phase 7 changes';
-    RAISE NOTICE '✓ TEST 19 PASSED: checkout_cart still works correctly after Phase 7 (Phase 6 regression clear)';
+        'TEST 19 FAILED: checkout_cart failed under authenticated admin context';
+
+    SELECT * INTO v_cart_rec FROM public.carts WHERE id = v_cart_id;
+    ASSERT v_cart_rec.status = 'checked_out', 'TEST 19 FAILED: Cart status was not updated to checked_out';
+
+    -- Reset authentication context back to empty
+    PERFORM set_config('request.jwt.claims', '', true);
+    RAISE NOTICE '✓ TEST 19 PASSED: checkout_cart successfully executed under simulated authenticated admin context';
 
     -- -------------------------------------------------------------------
     -- TEST 20: PRODUCT DELETE CASCADES INVENTORY (ON DELETE CASCADE)
+    -- Confirmed in database/schema.sql (line 116):
+    --   product_id UUID NOT NULL UNIQUE REFERENCES products(id) ON DELETE CASCADE
+    -- Deleting a product must automatically delete its corresponding inventory row.
     -- -------------------------------------------------------------------
-    -- v_prod_b_id has an auto-provisioned inventory row; delete the product
     DELETE FROM public.products WHERE id = v_prod_b_id;
     SELECT COUNT(*) INTO v_inv_count FROM public.inventory WHERE product_id = v_prod_b_id;
     ASSERT v_inv_count = 0,
         'TEST 20 FAILED: Inventory row was NOT cascaded when product was deleted';
-    RAISE NOTICE '✓ TEST 20 PASSED: Deleting a product cascades to delete its inventory row';
+    RAISE NOTICE '✓ TEST 20 PASSED: Deleting a product cascades to delete its inventory row (confirmed ON DELETE CASCADE)';
 
     -- -------------------------------------------------------------------
-    -- CLEANUP TEST FIXTURES
+    -- CLEANUP TEST FIXTURES (SUCCESSFUL PATH)
+    -- Explicit targeted removal of all test records created during this run.
     -- -------------------------------------------------------------------
     DELETE FROM public.orders       WHERE cart_id = v_cart_id;
     DELETE FROM public.cart_items   WHERE cart_id = v_cart_id;
@@ -340,4 +389,16 @@ BEGIN
     RAISE NOTICE '=======================================================';
     RAISE NOTICE 'ALL PHASE 7 ADMIN PRODUCT & INVENTORY TESTS PASSED!';
     RAISE NOTICE '=======================================================';
+
+EXCEPTION WHEN OTHERS THEN
+    -- Transaction-Safe Error Handling:
+    -- Reset JWT claims setting so session is clean
+    PERFORM set_config('request.jwt.claims', '', true);
+
+    -- Log failure message
+    RAISE NOTICE 'Phase 7 test suite failed: %. Transaction rolling back; uncommitted fixture records will not persist.', SQLERRM;
+
+    -- Re-raising the exception aborts the DO block transaction in PostgreSQL,
+    -- ensuring all uncommitted fixture changes are rolled back automatically.
+    RAISE;
 END $$;
